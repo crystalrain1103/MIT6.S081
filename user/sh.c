@@ -1,6 +1,7 @@
 // Shell.
 
 #include "kernel/types.h"
+#include "kernel/stat.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
 
@@ -12,6 +13,8 @@
 #define BACK  5
 
 #define MAXARGS 10
+
+int gettoken(char **ps, char *es, char **q, char **eq);
 
 struct cmd {
   int type;
@@ -54,6 +57,7 @@ void panic(char*);
 struct cmd *parsecmd(char*);
 
 // Execute cmd.  Never returns.
+__attribute__((noreturn))
 void
 runcmd(struct cmd *cmd)
 {
@@ -131,9 +135,10 @@ runcmd(struct cmd *cmd)
 }
 
 int
-getcmd(char *buf, int nbuf)
+getcmd(char *buf, int nbuf, int prompt)
 {
-  fprintf(2, "$ ");
+  if (prompt)
+    fprintf(2, "$ ");
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -146,6 +151,8 @@ main(void)
 {
   static char buf[100];
   int fd;
+  // TODO: intelligent prompt.
+  int prompt = 1;
 
   // Ensure that three file descriptors are open.
   while((fd = open("console", O_RDWR)) >= 0){
@@ -156,12 +163,37 @@ main(void)
   }
 
   // Read and run input commands.
-  while(getcmd(buf, sizeof(buf)) >= 0){
+  while(getcmd(buf, sizeof(buf), prompt) >= 0){
     if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
       // Chdir must be called by the parent, not the child.
       buf[strlen(buf)-1] = 0;  // chop \n
       if(chdir(buf+3) < 0)
         fprintf(2, "cannot cd %s\n", buf+3);
+      continue;
+    }
+    
+    if (buf[0] == 'w' && buf[1] == 'a' && buf[2] == 'i' && buf[3] == 't' && buf[4] == ' ') {
+      // Wait must be called by the parent, not the child.
+      char *ps = buf+5, *es = buf+5, *q, *eq;
+      while (*es != 0) es ++; 
+      gettoken(&ps, es, &q, &eq);
+      *eq = 0;
+      if (!strcmp(q, "all")) {
+          // Wait for all children
+          while ((wait((int*) 0)) > 0);
+      } else {
+          // Wait for specific PID
+          while (1) {
+              int wait_pid = wait((int *) 0);
+              if (wait_pid < 0) {
+                  fprintf(2, "wait: process %d not found\n", atoi(q));
+                  break;
+              }
+              if (wait_pid == atoi(q)) {
+                  break;
+              }
+          }
+      }
       continue;
     }
     if(fork1() == 0)

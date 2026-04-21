@@ -119,6 +119,7 @@ sys_sysinfo(void) {
 
   info.freemem = freemem();
   info.nproc = nproc();
+  info.loadavg = loadavg();
 
   p = myproc();
   if(copyout(p->pagetable, addr, (char *)&info, sizeof(info)) < 0)

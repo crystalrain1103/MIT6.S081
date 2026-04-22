@@ -1,0 +1,16 @@
+1. Which other xv6 system call(s) could be made faster using this shared page? Explain how.
+getpid():
+Current Behavior: The getpid() system call retrieves the process ID of the calling process. This requires a context switch to the kernel, where the process ID is fetched and returned to user space.
+Optimization with USYSCALL: The process ID (pid) can be stored in the USYSCALL shared page. User-space programs can directly read the pid from this page without invoking a system call, eliminating the context switch.
+uptime():
+Current Behavior: The uptime() system call retrieves the number of ticks since the system booted. This involves a context switch to the kernel to fetch the value.
+Optimization with USYSCALL: The kernel can periodically update the uptime value in the USYSCALL page. User-space programs can then read this value directly, avoiding the need for a system call.
+time():
+Current Behavior: The time() system call retrieves the current time. Like uptime(), this requires a context switch to the kernel.
+Optimization with USYSCALL: The kernel can maintain the current time in the USYSCALL page, updating it periodically. User-space programs can read the time directly from the shared page.
+
+2. Explain the output of vmprint in terms of Fig 3-4 from the text. What does page 0 contain? What is in page 2? When running in user mode, could the process read/write the memory mapped by page 1? What does the third to last page contain?
+  (1) Page 0 contains the process’s first user page: the program’s initial code page (for the first process, the init code / text, possibly with small data).
+  (2) The user stack is in page 2.
+  (3) No. Page 1 does not have the PTE_U bit set, so user mode cannot access it. It is the guard page.
+  (4) The USYSCALL page.

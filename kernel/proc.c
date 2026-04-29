@@ -245,7 +245,7 @@ uchar initcode[] = {
   0x93, 0x08, 0x70, 0x00, 0x73, 0x00, 0x00, 0x00,
   0x93, 0x08, 0x20, 0x00, 0x73, 0x00, 0x00, 0x00,
   0xef, 0xf0, 0x9f, 0xff, 0x2f, 0x69, 0x6e, 0x69,
-  0x74, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00,
+  0x74, 0x00, 0x00, 0x24, 0x10, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00
 };
 
@@ -261,11 +261,11 @@ userinit(void)
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
-  p->sz = PGSIZE;
+  p->sz = 2 * PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
-  p->trapframe->epc = 0;      // user program counter
-  p->trapframe->sp = PGSIZE;  // user stack pointer
+  p->trapframe->epc = PGSIZE;      // user program counter
+  p->trapframe->sp = 2 * PGSIZE;   // user stack pointer
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");

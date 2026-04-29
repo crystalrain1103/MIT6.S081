@@ -106,6 +106,36 @@ sys_pgaccess(void)
     return -1;
   return 0;
 }
+
+uint64
+sys_pgdirty(void)
+{
+  uint64 base, maskaddr;
+  int len;
+  uint mask;
+  struct proc *p;
+
+  if(argaddr(0, &base) < 0 || argint(1, &len) < 0 || argaddr(2, &maskaddr) < 0)
+    return -1;
+  if(len < 0 || len > 32)
+    return -1;
+
+  p = myproc();
+  mask = 0;
+  for(int i = 0; i < len; i++){
+    pte_t *pte = walk(p->pagetable, base + i * PGSIZE, 0);
+    if(pte == 0)
+      continue;
+    if((*pte & (PTE_V | PTE_U | PTE_D)) == (PTE_V | PTE_U | PTE_D)){
+      mask |= 1 << i;
+      *pte &= ~PTE_A;
+    }
+  }
+
+  if(copyout(p->pagetable, maskaddr, (char *)&mask, sizeof(mask)) < 0)
+    return -1;
+  return 0;
+}
 #endif
 
 uint64

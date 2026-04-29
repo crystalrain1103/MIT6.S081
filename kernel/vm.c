@@ -199,7 +199,7 @@ uvmcreate()
   return pagetable;
 }
 
-// Load the user initcode into address 0 of pagetable,
+// Load the user initcode into the first user page above address 0,
 // for the very first process.
 // sz must be less than a page.
 void
@@ -211,7 +211,7 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
     panic("inituvm: more than a page");
   mem = kalloc();
   memset(mem, 0, PGSIZE);
-  mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
+  mappages(pagetable, PGSIZE, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
   memmove(mem, src, sz);
 }
 
@@ -253,9 +253,14 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   if(newsz >= oldsz)
     return oldsz;
 
-  if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
-    int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
-    uvmunmap(pagetable, PGROUNDUP(newsz), npages, 1);
+  uint64 newtop = PGROUNDUP(newsz);
+  uint64 oldtop = PGROUNDUP(oldsz);
+
+  if(newtop < PGSIZE)
+    newtop = PGSIZE;
+  if(newtop < oldtop){
+    int npages = (oldtop - newtop) / PGSIZE;
+    uvmunmap(pagetable, newtop, npages, 1);
   }
 
   return newsz;
@@ -286,8 +291,8 @@ freewalk(pagetable_t pagetable)
 void
 uvmfree(pagetable_t pagetable, uint64 sz)
 {
-  if(sz > 0)
-    uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
+  if(sz > PGSIZE)
+    uvmunmap(pagetable, PGSIZE, (PGROUNDUP(sz) - PGSIZE) / PGSIZE, 1);
   freewalk(pagetable);
 }
 
@@ -305,9 +310,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uint flags;
   char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
+  for(i = PGSIZE; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
@@ -323,7 +328,8 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return 0;
 
  err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
+  if(i > PGSIZE)
+    uvmunmap(new, PGSIZE, (i - PGSIZE) / PGSIZE, 1);
   return -1;
 }
 

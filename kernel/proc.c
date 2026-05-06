@@ -238,7 +238,7 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint sz;
+  uint64 sz;
   struct proc *p = myproc();
 
   sz = p->sz;
@@ -247,6 +247,8 @@ growproc(int n)
       return -1;
     }
   } else if(n < 0){
+    if((uint64)(-n) > sz)
+      return -1;
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;

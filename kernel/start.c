@@ -38,6 +38,10 @@ start()
   w_mideleg(0xffff);
   w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);
 
+  // allow supervisor mode to access all of physical memory.
+  w_pmpaddr0(0x3fffffffffffffull);
+  w_pmpcfg0(0xf);
+
   // ask for clock interrupts.
   timerinit();
 

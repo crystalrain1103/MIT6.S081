@@ -1,0 +1,2 @@
+Why are there missing keys with 2 threads, but not with 1 thread? Identify a sequence of events with 2 threads that can lead to a key being missing.
+Because there are race conditions between two threads. That is, they could write to the same place of the hashtable at the same time, and the hashtable could only accept one request. 

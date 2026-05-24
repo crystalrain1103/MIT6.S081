@@ -484,3 +484,60 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int len, prot, flags, off;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *v = 0;
+
+  if(argaddr(0, &addr) < 0 || argint(1, &len) < 0 ||
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+     argfd(4, 0, &f) < 0 || argint(5, &off) < 0)
+    return -1;
+
+  if(addr != 0 || len <= 0 || off < 0 || f->type != FD_INODE)
+    return -1;
+  if((prot & PROT_READ) && !f->readable)
+    return -1;
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
+    return -1;
+  if((flags & (MAP_SHARED | MAP_PRIVATE)) == 0)
+    return -1;
+
+  len = PGROUNDUP(len);
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if(v == 0 || p->mmaptop < (uint64)len || p->mmaptop - len < p->sz)
+    return -1;
+
+  p->mmaptop -= len;
+  v->used = 1;
+  v->addr = p->mmaptop;
+  v->len = len;
+  v->prot = prot;
+  v->flags = flags;
+  v->offset = off;
+  v->file = filedup(f);
+
+  return v->addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int len;
+
+  if(argaddr(0, &addr) < 0 || argint(1, &len) < 0)
+    return -1;
+
+  return munmap_range(myproc(), addr, len);
+}

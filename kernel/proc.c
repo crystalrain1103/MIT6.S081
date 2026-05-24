@@ -4,6 +4,10 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "fcntl.h"
 #include "defs.h"
 
 struct cpu cpus[NCPU];
@@ -25,6 +29,22 @@ extern char trampoline[]; // trampoline.S
 // memory model when using p->parent.
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
+
+#define NMMAPPAGE 128
+
+struct mmap_page {
+  int used;
+  uint dev;
+  uint inum;
+  uint64 offset;
+  char *pa;
+  int ref;
+};
+
+struct {
+  struct spinlock lock;
+  struct mmap_page page[NMMAPPAGE];
+} mmapcache;
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -50,6 +70,7 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&mmapcache.lock, "mmapcache");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
@@ -140,6 +161,9 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  p->mmaptop = TRAPFRAME;
+  for(int i = 0; i < NVMA; i++)
+    p->vmas[i].used = 0;
 
   return p;
 }
@@ -163,6 +187,9 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  for(int i = 0; i < NVMA; i++)
+    p->vmas[i].used = 0;
+  p->mmaptop = 0;
   p->state = UNUSED;
 }
 
@@ -267,6 +294,253 @@ growproc(int n)
   return 0;
 }
 
+
+static int
+mmapcachekey(struct vma *v, uint64 va, uint *dev, uint *inum, uint64 *offset)
+{
+  if(v->file == 0 || v->file->ip == 0)
+    return -1;
+  *dev = v->file->ip->dev;
+  *inum = v->file->ip->inum;
+  *offset = PGROUNDDOWN(v->offset + (va - v->addr));
+  return 0;
+}
+
+static char*
+mmapcacheget(struct vma *v, uint64 va)
+{
+  uint dev, inum;
+  uint64 offset;
+  char *pa = 0;
+
+  if(mmapcachekey(v, va, &dev, &inum, &offset) < 0)
+    return 0;
+
+  acquire(&mmapcache.lock);
+  for(int i = 0; i < NMMAPPAGE; i++){
+    struct mmap_page *mp = &mmapcache.page[i];
+    if(mp->used && mp->dev == dev && mp->inum == inum && mp->offset == offset){
+      mp->ref++;
+      pa = mp->pa;
+      break;
+    }
+  }
+  release(&mmapcache.lock);
+
+  return pa;
+}
+
+static int
+mmapcacheadd(struct vma *v, uint64 va, char *pa)
+{
+  uint dev, inum;
+  uint64 offset;
+  int freei = -1;
+
+  if(mmapcachekey(v, va, &dev, &inum, &offset) < 0)
+    return -1;
+
+  acquire(&mmapcache.lock);
+  for(int i = 0; i < NMMAPPAGE; i++){
+    struct mmap_page *mp = &mmapcache.page[i];
+    if(mp->used && mp->dev == dev && mp->inum == inum && mp->offset == offset){
+      mp->ref++;
+      release(&mmapcache.lock);
+      kfree(pa);
+      return 0;
+    }
+    if(!mp->used && freei < 0)
+      freei = i;
+  }
+
+  if(freei < 0){
+    release(&mmapcache.lock);
+    return -1;
+  }
+
+  struct mmap_page *mp = &mmapcache.page[freei];
+  mp->used = 1;
+  mp->dev = dev;
+  mp->inum = inum;
+  mp->offset = offset;
+  mp->pa = pa;
+  mp->ref = 1;
+  release(&mmapcache.lock);
+  return 0;
+}
+
+static void
+mmapcacheput(struct vma *v, uint64 va)
+{
+  uint dev, inum;
+  uint64 offset;
+  char *pa = 0;
+
+  if(mmapcachekey(v, va, &dev, &inum, &offset) < 0)
+    return;
+
+  acquire(&mmapcache.lock);
+  for(int i = 0; i < NMMAPPAGE; i++){
+    struct mmap_page *mp = &mmapcache.page[i];
+    if(mp->used && mp->dev == dev && mp->inum == inum && mp->offset == offset){
+      if(--mp->ref == 0){
+        pa = mp->pa;
+        mp->used = 0;
+      }
+      break;
+    }
+  }
+  release(&mmapcache.lock);
+
+  if(pa)
+    kfree(pa);
+}
+
+
+static struct vma*
+find_vma(struct proc *p, uint64 va)
+{
+  for(int i = 0; i < NVMA; i++){
+    struct vma *v = &p->vmas[i];
+    if(v->used && va >= v->addr && va < v->addr + v->len)
+      return v;
+  }
+  return 0;
+}
+
+static int
+mmapwriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len)
+{
+  int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+
+  if((v->flags & MAP_SHARED) == 0 || (v->prot & PROT_WRITE) == 0)
+    return 0;
+
+  for(uint64 a = addr; a < addr + len; a += PGSIZE){
+    if(walkaddr(p->pagetable, a) == 0)
+      continue;
+
+    uint64 fileoff = v->offset + (a - v->addr);
+    int written = 0;
+    while(written < PGSIZE){
+      int n = PGSIZE - written;
+      if(n > max)
+        n = max;
+
+      begin_op();
+      ilock(v->file->ip);
+      int r = writei(v->file->ip, 1, a + written, fileoff + written, n);
+      iunlock(v->file->ip);
+      end_op();
+
+      if(r != n)
+        return -1;
+      written += r;
+    }
+  }
+
+  return 0;
+}
+
+int
+munmap_range(struct proc *p, uint64 addr, uint64 len)
+{
+  if(len == 0 || addr % PGSIZE)
+    return -1;
+
+  len = PGROUNDUP(len);
+  struct vma *v = find_vma(p, addr);
+  if(v == 0 || addr + len > v->addr + v->len)
+    return -1;
+
+  uint64 end = addr + len;
+  uint64 vend = v->addr + v->len;
+  if(addr != v->addr && end != vend)
+    return -1;
+
+  if(mmapwriteback(p, v, addr, len) < 0)
+    return -1;
+
+  for(uint64 a = addr; a < end; a += PGSIZE){
+    pte_t *pte = walk(p->pagetable, a, 0);
+    if(pte && (*pte & PTE_V)){
+      if((v->flags & MAP_PRIVATE) && (v->prot & PROT_WRITE)){
+        uvmunmap(p->pagetable, a, 1, 1);
+      } else {
+        uvmunmap(p->pagetable, a, 1, 0);
+        mmapcacheput(v, a);
+      }
+    }
+  }
+
+  if(addr == v->addr && len == v->len){
+    fileclose(v->file);
+    v->used = 0;
+  } else if(addr == v->addr){
+    v->addr += len;
+    v->offset += len;
+    v->len -= len;
+  } else {
+    v->len -= len;
+  }
+
+  return 0;
+}
+
+int
+mmapfault(uint64 va, int write)
+{
+  struct proc *p = myproc();
+  struct vma *v = find_vma(p, va);
+  char *mem;
+  int perm = PTE_U;
+
+  if(v == 0 || (write && (v->prot & PROT_WRITE) == 0))
+    return -1;
+
+  va = PGROUNDDOWN(va);
+  if(walkaddr(p->pagetable, va) != 0)
+    return -1;
+
+  int private = (v->flags & MAP_PRIVATE) && (v->prot & PROT_WRITE);
+  if(!private)
+    mem = mmapcacheget(v, va);
+  else
+    mem = 0;
+
+  if(mem == 0){
+    if((mem = kalloc()) == 0)
+      return -1;
+    memset(mem, 0, PGSIZE);
+
+    ilock(v->file->ip);
+    readi(v->file->ip, 0, (uint64)mem, v->offset + (va - v->addr), PGSIZE);
+    iunlock(v->file->ip);
+
+    if(!private && mmapcacheadd(v, va, mem) < 0){
+      kfree(mem);
+      return -1;
+    }
+  }
+
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_W;
+  if(v->prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) < 0){
+    if(private)
+      kfree(mem);
+    else
+      mmapcacheput(v, va);
+    return -1;
+  }
+
+  return 0;
+}
+
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int
@@ -288,6 +562,12 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->mmaptop = p->mmaptop;
+  for(i = 0; i < NVMA; i++){
+    np->vmas[i] = p->vmas[i];
+    if(np->vmas[i].used)
+      filedup(np->vmas[i].file);
+  }
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -343,6 +623,11 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used)
+      munmap_range(p, p->vmas[i].addr, p->vmas[i].len);
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
